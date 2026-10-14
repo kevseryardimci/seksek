@@ -55,6 +55,7 @@ export class LayoutNavigation {
     this.backgroundAudioStartTime = 0;
     this.backgroundAudioOffset = 0;
     this.backgroundMusicRequestId = 0;
+    this.backgroundMusicStarting = false;
     this.audioMuted = false;
     this.syncGameOverlay();
     this.refreshButtonHitAreas();
@@ -70,6 +71,7 @@ export class LayoutNavigation {
     document.addEventListener("pointerup", event => this.handlePointer(event), true);
     document.addEventListener("pointermove", event => this.updateButtonHover(event), true);
     runtime.addEventListener("afterlayoutstart", () => {
+      this.disableTasDragDrop();
       this.syncGameOverlay();
       this.refreshButtonHitAreas();
       this.applyPendingPageFrame();
@@ -79,6 +81,10 @@ export class LayoutNavigation {
       setTimeout(() => this.refreshButtonHitAreas(), 50);
       setTimeout(() => this.syncFinalScore(), 50);
     });
+    // Attempt autoplay as soon as the initial layout is available. If the
+    // browser requires a gesture, handlePointer() retries without waiting for
+    // the game or an answer to start.
+    this.syncBackgroundMusic();
   }
 
   currentLayoutObject(objectName) {
@@ -100,10 +106,11 @@ export class LayoutNavigation {
 
     const medal = this.currentLayoutObject("madalya");
     if (!medal || !Number.isFinite(storedScore)) return;
+    const correctCount = Math.max(0, Math.floor(storedScore / 10));
     let frame = 3;
-    if (storedScore >= 70) frame = 0;
-    else if (storedScore >= 50) frame = 1;
-    else if (storedScore >= 30) frame = 2;
+    if (correctCount >= 13) frame = 0;
+    else if (correctCount >= 9) frame = 1;
+    else if (correctCount >= 5) frame = 2;
     medal.animationFrame = frame;
   }
 
@@ -243,11 +250,23 @@ export class LayoutNavigation {
     }
   }
 
+  disableTasDragDrop() {
+    const stone = this.runtime.objects.tas?.getFirstInstance?.();
+    if (!stone?.behaviors) return;
+    for (const [name, behavior] of Object.entries(stone.behaviors)) {
+      if (name.toLowerCase().includes("drag") && behavior) {
+        behavior.isEnabled = false;
+      }
+    }
+  }
+
   handlePointer(event) {
-    // Browsers can block autoplay until the first user gesture. Retry the
-    // background track on that first gesture while on the cover layout.
-    if (this.currentLayoutName() === "kapak" && !this.backgroundMusicPaused &&
-        !this.backgroundMusicStarted) this.syncBackgroundMusic();
+    // Try again on the first user gesture if the browser blocked autoplay at
+    // startup. The track itself is shared by all layouts and is not restarted
+    // here when it is already playing.
+    if (!this.backgroundMusicPaused && !this.backgroundMusicStarted) {
+      this.syncBackgroundMusic();
+    }
     const now = performance.now();
     if (now - this.lastHandledAt < 150) return;
     const route = this.routes[this.currentLayoutName()];
@@ -259,6 +278,7 @@ export class LayoutNavigation {
     if (!point || typeof point.x !== "number" || typeof point.y !== "number") return;
     for (const [buttonName, destination] of Object.entries(route)) {
       if (this.hitButtonArea(buttonName, point)) {
+        if (buttonName === "btn_play") this.disableTasDragDrop();
         // Once a stone has been thrown, the throw button stays locked until
         // the current question and hopscotch return sequence are complete.
         if (buttonName === "btn_tas_at" && this.runtime.__sekSekGame?.throwButtonBlocked) return;
@@ -284,7 +304,13 @@ export class LayoutNavigation {
       this.applyPendingPageFrame();
       return;
     }
-    this.stopAudioBeforeLayoutChange();
+    // Dispose the previous game controller before opening oyun.  Otherwise
+    // an old requestAnimationFrame/return animation can still write to its
+    // stale tas instance during the first frame of the new layout.
+    if (layoutName === "oyun") {
+      this.runtime.__sekSekGame?.dispose?.();
+      this.runtime.__sekSekGame = null;
+    }
     this.syncGameOverlay(false);
     this.runtime.goToLayout(layoutName);
     setTimeout(() => {
@@ -308,6 +334,7 @@ export class LayoutNavigation {
       // This prevents the throw button from calling startStage() on a stale
       // controller whose stone belonged to an earlier layout instance.
       if (activeLayout !== "oyun" || !activeStone || controllerLayout !== "oyun" || controller?.stone !== activeStone) {
+        controller?.dispose?.();
         this.runtime.__sekSekGame = new SekSekStages(this.runtime);
       }
       this.runtime.__sekSekGame?.startStage?.();
@@ -363,9 +390,11 @@ export class LayoutNavigation {
   }
 
   syncBackgroundMusic() {
-    // Music is restarted once for every layout. Keep this as the single
-    // background-music owner so layout changes cannot stack two tracks.
     if (this.backgroundMusicPaused) return;
+    // Keep one source alive while navigating between layouts. This prevents
+    // overlap and lets the music continue instead of waiting for a button or
+    // answer click before it becomes audible again.
+    if (this.backgroundAudioSource || this.backgroundMusicStarting) return;
     this.startBackgroundMusic(0);
   }
 
@@ -437,11 +466,16 @@ export class LayoutNavigation {
   }
 
   async startBackgroundMusic(offset = 0) {
+    if (this.backgroundMusicStarting || this.backgroundAudioSource) return;
+    this.backgroundMusicStarting = true;
     const requestId = ++this.backgroundMusicRequestId;
     const audioObject = this.runtime.objects.Audio;
     const audioContext = audioObject?.audioContext;
     const destination = audioObject?.destinationNode;
-    if (!audioContext || !destination) return;
+    if (!audioContext || !destination) {
+      this.backgroundMusicStarting = false;
+      return;
+    }
     try {
       await audioContext.resume();
       const buffer = await this.loadBackgroundAudio();
@@ -460,6 +494,8 @@ export class LayoutNavigation {
       this.backgroundMusicStarted = true;
     } catch (_) {
       this.backgroundMusicStarted = false;
+    } finally {
+      this.backgroundMusicStarting = false;
     }
   }
 

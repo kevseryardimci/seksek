@@ -58,6 +58,9 @@ export class SekSekStages {
     this.stepTimer = null;
     this.stepAnimationFrame = null;
     this.stoneReturnFrame = null;
+    this.flightAnimationFrame = null;
+    this.containerAnimationFrame = null;
+    this.stoneScaleFrame = null;
     this.stonePausePointIndex = null;
     this.stoneReturnTriggered = false;
     this.stepIndex = 0;
@@ -65,13 +68,16 @@ export class SekSekStages {
     this.throwButtonBlocked = false;
     this.finalTransitionScheduled = false;
     this.answerLocked = false;
+    this.returnQuestionActive = false;
     this.questionBackground = runtime.objects.sorufon?.getFirstInstance();
     this.stageContainer = this.stageStone ? [this.stageStone, ...this.stageStone.getOtherContainerInstances()] : [];
     this.throwButton = runtime.objects.btn_tas_at?.getFirstInstance();
     this.stage = 0;
-    this.totalQuestions = 8;
+    this.currentStagePointIndex = null;
+    this.totalStages = 8;
+    this.totalQuestions = 16;
     // Construct frame indices are 0..32. Frame 0 is reserved, so the
-    // available question pool is 1..32; only the first 8 shuffled items run.
+    // available question pool is 1..32; only the first 16 shuffled items run.
     this.questionFrameOrder = Array.from({ length: 32 }, (_, i) => i + 1);
     for (let i = this.questionFrameOrder.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -88,6 +94,7 @@ export class SekSekStages {
     this.scaleTime = 0;
     this.scaleDuration = 1.0;
     this.start = { x: this.stone?.x ?? 1319, y: this.stone?.y ?? 986 };
+    this.scriptStonePosition = this.stone ? { x: this.stone.x, y: this.stone.y } : null;
     if (this.questions) this.questions.isVisible = false;
     for (const answer of this.answerSprites) answer.isVisible = false;
     if (this.correctFeedback) this.correctFeedback.isVisible = false;
@@ -118,12 +125,40 @@ export class SekSekStages {
     for (const item of this.stageContainer) item.isVisible = false;
     const dragDrop = this.stone?.behaviors?.DragDrop;
     if (dragDrop) dragDrop.isEnabled = false;
+    // Keep the stone under script control.  The game moves it during the
+    // throw and return animations; the player must never be able to drag it.
+    if (this.stone?.behaviors) {
+      for (const [name, behavior] of Object.entries(this.stone.behaviors)) {
+        if (name.toLowerCase().includes("drag") && behavior) {
+          behavior.isEnabled = false;
+        }
+      }
+    }
     this.createStatus();
     // Listen on the actual game canvas so this works in both preview and export.
     const canvas = runtime.canvas || document.querySelector("canvas");
-    canvas?.addEventListener("pointerup", e => this.pointerDown(e));
-    document.addEventListener("pointerup", e => this.pointerDown(e), true);
+    this.canvasPointerUpHandler = e => this.pointerDown(e);
+    this.documentPointerUpHandler = e => this.pointerDown(e);
+    canvas?.addEventListener("pointerup", this.canvasPointerUpHandler);
+    document.addEventListener("pointerup", this.documentPointerUpHandler, true);
+    this.inputCanvas = canvas;
     this.resetStone();
+  }
+  dispose() {
+    this.clearStepTimer();
+    this.clearAnswerTimers();
+    for (const frame of [this.flightAnimationFrame, this.containerAnimationFrame, this.stoneScaleFrame]) {
+      if (frame !== null) cancelAnimationFrame(frame);
+    }
+    this.flightAnimationFrame = null;
+    this.containerAnimationFrame = null;
+    this.stoneScaleFrame = null;
+    this.inputCanvas?.removeEventListener("pointerup", this.canvasPointerUpHandler);
+    document.removeEventListener("pointerup", this.documentPointerUpHandler, true);
+    this.statusElement?.remove();
+    this.throwButtonOverlay?.remove();
+    this.statusElement = null;
+    this.throwButtonOverlay = null;
   }
   createStatus() {
     const canvas = this.runtime.canvas || document.querySelector("canvas");
@@ -211,9 +246,12 @@ export class SekSekStages {
   startStage() {
     // There are exactly eight questions/stages. Once the eighth question has
     // been created, the throw button cannot start a ninth one.
-    if (this.stage > this.totalQuestions - 1 || this.questionFrameIndex >= this.totalQuestions ||
+    if (this.stage > this.totalStages - 1 || this.questionFrameIndex >= this.totalQuestions ||
         this.flying || this.stepsActive || this.throwButtonBlocked) return;
     this.setThrowButtonEnabled(false);
+    // The stone is currently on the board point for this stage.  The foot
+    // route must skip that same hopscotch point.
+    this.currentStagePointIndex = this.stage;
     this.clearStepTimer();
     this.clearAnswerTimers();
     this.showRandomQuestionFrame();
@@ -233,11 +271,11 @@ export class SekSekStages {
     console.info(`[SekSek] Kademe ${this.stage+1} başladı`, this.flightStart, this.flightTarget);
     this.status(`Kademe ${this.stage+1}: Taş atılıyor...`);
     this.lastFrameTime=performance.now();
-    requestAnimationFrame(time => this.animate(time));
+    this.flightAnimationFrame = requestAnimationFrame(time => this.animate(time));
   }
   showRandomQuestionFrame() {
     if (!this.questions) return;
-    // Pick 8 different frames from the shuffled 1..32 question pool.
+    // Pick different frames from the shuffled 1..32 question pool.
     const index = Math.min(this.questionFrameIndex, this.totalQuestions - 1);
     this.questions.animationFrame = this.questionFrameOrder[index];
     this.restoreQuestionSize();
@@ -404,9 +442,18 @@ export class SekSekStages {
         this.throwButtonOverlay.disabled = true;
         this.throwButtonOverlay.style.pointerEvents = "none";
       }
-      this.status("8 soru tamamlandı.");
+      this.status("16 soru tamamlandı.");
     }
-    this.startHopscotchSteps();
+    if (this.returnQuestionActive) {
+      this.returnQuestionActive = false;
+      this.startStoneReturnAndResumeFeet();
+      return;
+    }
+    // Let the tas4 container finish disappearing before the feet begin.
+    this.stepTimer = setTimeout(() => {
+      this.stepTimer = null;
+      this.startHopscotchSteps();
+    }, 300);
   }
   clearStepTimer() {
     if (this.stepTimer !== null) clearTimeout(this.stepTimer);
@@ -435,13 +482,44 @@ export class SekSekStages {
     // Forward right foot: 1 -> 2 -> 3 -> 5 -> 6 -> 8.
     // Return right foot: 10 -> 11 -> 13 -> 14 -> 15 -> 16.
     // The left foot is placed separately on 4, 7, 9 and 12.
-    this.stepTargets = [0, 1, 2, 4, 5, 7, 9, 10, 12, 13, 14, 15];
+    const forwardTargets = this.currentStagePointIndex === 4
+      ? [0, 1, 2, 3, 5, 7] // 1, 2, 3, 4, 6, 8
+      : this.currentStagePointIndex === 7
+        ? [0, 1, 2, 4, 5, 6] // 1, 2, 3, 5, 6, 7
+      : [0, 1, 2, 4, 5, 7]; // 1, 2, 3, 5, 6, 8
+    const returnTargets = this.currentStagePointIndex === 3
+      ? [9, 10, 11, 13, 14, 15] // 10, 11, 12, 14, 15, 16
+      : this.currentStagePointIndex === 6
+        ? [8, 10, 12, 13, 14, 15] // 9, 11, 13, 14, 15, 16
+      : [9, 10, 12, 13, 14, 15]; // 10, 11, 13, 14, 15, 16
+    const fullStepTargets = [...forwardTargets, ...returnTargets];
+    // The return route is reversed relative to the board: stone point 1
+    // corresponds to adimlar point 16, point 2 to 15, point 3 to 14,
+    // point 4 to 13, and so on. Skip that matching return point as well;
+    // this also handles tiles occupied by sol_ayak.
+    const returnPointByForwardPoint = {
+      0: 15, 1: 14, 2: 13, 3: 12, 4: 11, 5: 10, 6: 9, 7: 8
+    };
+    const returnPointToSkip = returnPointByForwardPoint[this.currentStagePointIndex];
+    this.stepTargets = fullStepTargets.filter(index =>
+      index !== this.currentStagePointIndex && index !== returnPointToSkip
+    );
     const firstPoint = this.getStepPoint(this.stepTargets[0]);
     if (!firstPoint) return;
-    this.rightFoot.x = firstPoint.x;
-    this.rightFoot.y = firstPoint.y;
-    this.stepIndex = 1;
-    this.stonePausePointIndex = this.findStoneReturnPoint();
+    // Start from the foot's real starting position so the first jump is
+    // visible.  The previous implementation teleported directly to the
+    // first imagepoint, hiding the first step effect.
+    if (this.initialRightFoot) {
+      this.rightFoot.x = this.initialRightFoot.x;
+      this.rightFoot.y = this.initialRightFoot.y;
+      this.rightFoot.angle = this.initialRightFoot.angle;
+    }
+    this.stepIndex = 0;
+    // On stage 3, return the stone when the feet reach imagepoints 12-13:
+    // sag_ayak lands on point 13 while sol_ayak is shown on point 12.
+    this.stonePausePointIndex = this.currentStagePointIndex === 2
+      ? 12
+      : this.findStoneReturnPoint();
     this.stoneReturnTriggered = false;
     // Stay on imagepoint1 for 0.3 seconds before the first jump.
     this.stepTimer = setTimeout(() => {
@@ -449,14 +527,38 @@ export class SekSekStages {
       this.animateNextFootStep();
     }, 300);
   }
+  prepareReturnQuestion() {
+    this.returnQuestionActive = true;
+    this.answerLocked = false;
+    this.showRandomQuestionFrame();
+    this.advanceQuestionNumber();
+    this.showStageStone();
+    this.showQuestion();
+  }
+  startStoneReturnAndResumeFeet() {
+    this.returnStoneToStart(() => {
+      if (this.stepIndex < this.stepTargets.length) {
+        this.stepTimer = setTimeout(() => {
+          this.stepTimer = null;
+          this.animateNextFootStep();
+        }, 0);
+      } else {
+        this.stepTimer = setTimeout(() => {
+          this.stepTimer = null;
+          this.resetFeetToStart();
+        }, 300);
+      }
+    });
+  }
   animateNextFootStep() {
     if (!this.rightFoot || this.stepIndex >= this.stepTargets.length) return;
     // The left foot is visible only at its designated landing points. Hide
     // it immediately when the right foot starts moving to a new point.
     if (this.leftFoot) this.leftFoot.isVisible = false;
-    const fromPointIndex = this.stepTargets[this.stepIndex - 1];
     const toPointIndex = this.stepTargets[this.stepIndex];
-    const from = this.getStepPoint(fromPointIndex);
+    const from = this.stepIndex === 0 && this.initialRightFoot
+      ? { x: this.initialRightFoot.x, y: this.initialRightFoot.y }
+      : this.getStepPoint(this.stepTargets[this.stepIndex - 1]);
     const to = this.getStepPoint(toPointIndex);
     if (!from || !to) return;
     const startTime = performance.now();
@@ -476,31 +578,46 @@ export class SekSekStages {
       this.rightFoot.y = to.y;
       // Play the footstep exactly when sag_ayak lands on the target point.
       this.runtime.__sekSekNavigation?.playSoundEffect?.("ayaksesi.webm");
-      const movingForward = this.stepIndex <= 5;
+      const movingForward = toPointIndex <= 7;
       // On the forward route, show the left foot on imagepoint4 when the
       // right foot lands on imagepoint5.
-      if (movingForward && toPointIndex === 4 && this.leftFoot) {
+      if (movingForward && toPointIndex === 4 &&
+          this.currentStagePointIndex !== 3 &&
+          this.currentStagePointIndex !== 4 && this.leftFoot) {
         const leftPoint = this.getStepPoint(3);
         if (leftPoint) {
           this.leftFoot.x = leftPoint.x;
           this.leftFoot.y = leftPoint.y;
           this.leftFoot.isVisible = true;
         }
-      } else if (toPointIndex === 5 && this.leftFoot) {
+      } else if (toPointIndex === 5 &&
+                 this.currentStagePointIndex !== 6 && this.leftFoot) {
         this.leftFoot.isVisible = false;
       // When the right foot reaches imagepoint8, show the left foot on
       // imagepoint7. The right foot turns after the landing pause below.
-      } else if (movingForward && toPointIndex === 7 && this.leftFoot) {
+      } else if (movingForward && toPointIndex === 7 &&
+                 this.currentStagePointIndex !== 6 && this.leftFoot) {
         const leftPoint = this.getStepPoint(6);
         if (leftPoint) {
           this.leftFoot.x = leftPoint.x;
           this.leftFoot.y = leftPoint.y;
           this.leftFoot.isVisible = true;
         }
+      } else if (movingForward && toPointIndex === 7 &&
+                 this.currentStagePointIndex === 6 && this.leftFoot) {
+        this.leftFoot.isVisible = false;
+      } else if (movingForward && toPointIndex === 6 &&
+                 this.currentStagePointIndex === 7 && this.leftFoot) {
+        this.leftFoot.isVisible = false;
+      } else if (!movingForward && toPointIndex === 8 &&
+                 this.currentStagePointIndex === 6 && this.leftFoot) {
+        this.leftFoot.isVisible = false;
       // On the return route, right foot imagepoint10 places the left foot on
       // imagepoint9, facing back. Right foot imagepoint13 places the left
       // foot on imagepoint12, also facing back.
-      } else if (!movingForward && toPointIndex === 9 && this.leftFoot) {
+      } else if (!movingForward && toPointIndex === 9 &&
+                 this.currentStagePointIndex !== 6 &&
+                 this.currentStagePointIndex !== 7 && this.leftFoot) {
         const leftPoint = this.getStepPoint(8);
         if (leftPoint) {
           this.leftFoot.x = leftPoint.x;
@@ -508,7 +625,11 @@ export class SekSekStages {
           this.leftFoot.angle = Math.PI;
           this.leftFoot.isVisible = true;
         }
-      } else if (!movingForward && toPointIndex === 12 && this.leftFoot) {
+      } else if (!movingForward && toPointIndex === 9 &&
+                 this.currentStagePointIndex === 7 && this.leftFoot) {
+        this.leftFoot.isVisible = false;
+      } else if (!movingForward && toPointIndex === 12 &&
+                 this.currentStagePointIndex !== 4 && this.leftFoot) {
         const leftPoint = this.getStepPoint(11);
         if (leftPoint) {
           this.leftFoot.x = leftPoint.x;
@@ -523,19 +644,9 @@ export class SekSekStages {
         toPointIndex === this.stonePausePointIndex;
       if (shouldReturnStone) {
         this.stoneReturnTriggered = true;
-        this.returnStoneToStart(() => {
-          if (this.stepIndex < this.stepTargets.length) {
-            this.stepTimer = setTimeout(() => {
-              this.stepTimer = null;
-              this.animateNextFootStep();
-            }, 0);
-          } else {
-            this.stepTimer = setTimeout(() => {
-              this.stepTimer = null;
-              this.resetFeetToStart();
-            }, 300);
-          }
-        });
+        // Pause the feet and wait for the next unique question. The stone
+        // return and the remaining foot route resume after that answer.
+        this.prepareReturnQuestion();
         return;
       }
       if (this.stepIndex < this.stepTargets.length) {
@@ -544,7 +655,11 @@ export class SekSekStages {
         this.stepTimer = setTimeout(() => {
           this.stepTimer = null;
           // Wait on imagepoint8 before changing direction.
-          if (toPointIndex === 7 && movingForward) this.rightFoot.angle = Math.PI;
+          if ((toPointIndex === 7 ||
+               (this.currentStagePointIndex === 7 && toPointIndex === 6)) && movingForward) {
+            this.rightFoot.angle = Math.PI;
+            if (this.leftFoot) this.leftFoot.angle = Math.PI;
+          }
           this.animateNextFootStep();
         }, 300);
       } else {
@@ -561,7 +676,7 @@ export class SekSekStages {
   }
   findStoneReturnPoint() {
     if (!this.stone) return null;
-    const returnPointIndices = [9, 10, 12, 13, 14, 15];
+    const returnPointIndices = (this.stepTargets || []).filter(index => index >= 8);
     let nearest = null;
     let nearestDistance = Infinity;
     for (const pointIndex of returnPointIndices) {
@@ -589,12 +704,14 @@ export class SekSekStages {
       const t = Math.min(1, Math.max(0, (now - startTime) / duration));
       this.stone.x = from.x + (to.x - from.x) * t;
       this.stone.y = from.y + (to.y - from.y) * t - Math.sin(Math.PI * t) * arcHeight;
+      this.rememberStonePosition();
       if (t < 1) {
         this.stoneReturnFrame = requestAnimationFrame(animate);
         return;
       }
       this.stone.x = to.x;
       this.stone.y = to.y;
+      this.rememberStonePosition();
       this.stoneReturnFrame = null;
       onComplete?.();
     };
@@ -617,7 +734,7 @@ export class SekSekStages {
     if (this.questionFrameIndex < this.totalQuestions) this.setThrowButtonEnabled(true);
     // The final layout is opened only after the eighth question's complete
     // walk has returned both feet to their original positions.
-    if (this.stage === this.totalQuestions - 1 &&
+    if (this.stage === this.totalStages - 1 &&
         this.questionFrameIndex >= this.totalQuestions &&
         !this.finalTransitionScheduled) {
       this.captureCurrentScore();
@@ -669,7 +786,8 @@ export class SekSekStages {
     if (text && Number.isFinite(score)) text.text = String(score);
     const medal = this.runtime.objects.madalya?.getFirstInstance?.();
     if (!medal || !Number.isFinite(score)) return;
-    medal.animationFrame = score >= 70 ? 0 : score >= 50 ? 1 : score >= 30 ? 2 : 3;
+    const correctCount = Math.max(0, Math.floor(score / 10));
+    medal.animationFrame = correctCount >= 13 ? 0 : correctCount >= 9 ? 1 : correctCount >= 5 ? 2 : 3;
   }
   showFeedback(feedback, option, hideOtherFeedback = true) {
     if (hideOtherFeedback) {
@@ -710,16 +828,31 @@ export class SekSekStages {
       answer.x = background.x; answer.y = background.y;
     }
     // Build the click area only after the answer has been placed.  The area
-    // therefore follows the displayed frame's actual x/y/width/height and
-    // never uses the old layout position or the frame collision polygon.
+    // follows both the displayed cvpN frame and its cvofonF background, so
+    // clicking anywhere on the answer row selects that same option.  The
+    // background bounds are recalculated whenever the container scales.
     if (answer.isAnswerOption) {
-      const width = Math.abs(answer.width ?? 0);
-      const height = Math.abs(answer.height ?? 0);
+      const bounds = instance => {
+        if (!instance) return null;
+        const width = Math.abs(Number(instance.width) || 0);
+        const height = Math.abs(Number(instance.height) || 0);
+        const originX = Number.isFinite(instance.originX) ? instance.originX : 0.5;
+        const originY = Number.isFinite(instance.originY) ? instance.originY : 0.5;
+        return {
+          left: instance.x - width * originX,
+          top: instance.y - height * originY,
+          right: instance.x - width * originX + width,
+          bottom: instance.y - height * originY + height
+        };
+      };
+      const optionBounds = bounds(answer);
+      const backgroundBounds = bounds(background);
+      const areas = [optionBounds, backgroundBounds].filter(Boolean);
       answer.answerHitArea = {
-        left: answer.x,
-        top: answer.y,
-        right: answer.x + width,
-        bottom: answer.y + height
+        left: Math.min(...areas.map(area => area.left)),
+        top: Math.min(...areas.map(area => area.top)),
+        right: Math.max(...areas.map(area => area.right)),
+        bottom: Math.max(...areas.map(area => area.bottom))
       };
     }
   }
@@ -759,7 +892,10 @@ export class SekSekStages {
     this.questionNumber.animationFrame = Math.min(this.questionNumber.animationFrame + 1, 8);
   }
   resetStone(message="Kademe 1 için taşı atma butonuna bas.") { this.throwStarted=false; this.flying=false; this.resetPosition(); this.status(message); }
-  resetPosition() { if (this.stone) { this.stone.x=this.start.x; this.stone.y=this.start.y; } }
+  rememberStonePosition() {
+    if (this.stone) this.scriptStonePosition = { x: this.stone.x, y: this.stone.y };
+  }
+  resetPosition() { if (this.stone) { this.stone.x=this.start.x; this.stone.y=this.start.y; this.rememberStonePosition(); } }
   status(message) { if (this.statusElement) this.statusElement.textContent=message; }
   animate(time) {
     if (!this.flying || !this.stone || !this.flightStart || !this.flightTarget) return;
@@ -770,9 +906,11 @@ export class SekSekStages {
     const arcHeight = 240;
     this.stone.x = this.flightStart.x + (this.flightTarget.x - this.flightStart.x) * t;
     this.stone.y = this.flightStart.y + (this.flightTarget.y - this.flightStart.y) * t - Math.sin(Math.PI * t) * arcHeight;
+    this.rememberStonePosition();
     if (t >= 1) {
       this.stone.x=this.flightTarget.x;
       this.stone.y=this.flightTarget.y;
+      this.rememberStonePosition();
       this.runtime.__sekSekNavigation?.playSoundEffect?.("tassesi.webm");
       this.flying=false;
       this.throwStarted=false;
@@ -780,9 +918,11 @@ export class SekSekStages {
       // Replay the same tas4 container entrance effect for every stage.
       this.showStageStone();
       this.showQuestion();
-      if (this.stage < 7) { this.stage++; this.status(`Kademe ${this.stage} tamamlandı. Sıradaki taş için butona bas.`); }
+      if (this.stage < this.totalStages - 1) { this.stage++; this.status(`Kademe ${this.stage} tamamlandı. Sıradaki taş için butona bas.`); }
       else this.status("8 kademe tamamlandı!");
-    } else requestAnimationFrame(nextTime => this.animate(nextTime));
+    } else {
+      this.flightAnimationFrame = requestAnimationFrame(nextTime => this.animate(nextTime));
+    }
   }
   showStageStone() {
     if (!this.stageStone) return;
@@ -805,7 +945,7 @@ export class SekSekStages {
     this.containerScaling = true;
     this.containerScaleTime = 0;
     this.lastContainerScaleFrame = performance.now();
-    requestAnimationFrame(time => this.animateContainerScale(time));
+    this.containerAnimationFrame = requestAnimationFrame(time => this.animateContainerScale(time));
   }
   animateContainerScale(time) {
     if (!this.containerScaling) return;
@@ -838,7 +978,9 @@ export class SekSekStages {
     this.positionSpecialQuestionSprite();
     if (t >= 1) {
       this.containerScaling = false;
-    } else requestAnimationFrame(nextTime => this.animateContainerScale(nextTime));
+    } else {
+      this.containerAnimationFrame = requestAnimationFrame(nextTime => this.animateContainerScale(nextTime));
+    }
   }
   startStoneScaleUp() {
     if (!this.stone) return;
@@ -847,7 +989,7 @@ export class SekSekStages {
     this.stone.width = this.normalStoneSize.width * 0.25;
     this.stone.height = this.normalStoneSize.height * 0.25;
     this.lastScaleFrame = performance.now();
-    requestAnimationFrame(time => this.animateStoneScale(time));
+    this.stoneScaleFrame = requestAnimationFrame(time => this.animateStoneScale(time));
   }
   animateStoneScale(time) {
     if (!this.scaling || !this.stone) return;
@@ -861,9 +1003,20 @@ export class SekSekStages {
       this.stone.width = this.normalStoneSize.width;
       this.stone.height = this.normalStoneSize.height;
       this.scaling = false;
-    } else requestAnimationFrame(nextTime => this.animateStoneScale(nextTime));
+    } else {
+      this.stoneScaleFrame = requestAnimationFrame(nextTime => this.animateStoneScale(nextTime));
+    }
   }
   tick() {
+    // The stone is script-controlled.  Restore its last game position if a
+    // pointer/behavior attempts to drag it between animation frames.
+    const dragDrop = this.stone?.behaviors?.DragDrop;
+    if (dragDrop) dragDrop.isEnabled = false;
+    if (this.stone && this.scriptStonePosition &&
+        (this.stone.x !== this.scriptStonePosition.x || this.stone.y !== this.scriptStonePosition.y)) {
+      this.stone.x = this.scriptStonePosition.x;
+      this.stone.y = this.scriptStonePosition.y;
+    }
     if (this.flying || this.containerScaling) return;
     if (this.questions?.isVisible) this.restoreQuestionSize();
     this.positionSpecialQuestionSprite();

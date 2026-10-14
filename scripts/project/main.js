@@ -18,7 +18,10 @@ async function OnBeforeProjectStart(runtime)
 		let layoutName = "";
 		try { layoutName = runtime.layout?.name || ""; } catch (_) {}
 		if (layoutName !== "oyun") return;
-		if (!runtime.__sekSekGame?.stone) {
+		const activeStone = runtime.objects.tas?.getFirstInstance?.();
+		const controller = runtime.__sekSekGame;
+		if (!controller || controller.layoutName !== "oyun" || controller.stone !== activeStone) {
+			controller?.dispose?.();
 			runtime.__sekSekGame = new SekSekStages(runtime);
 			console.info("[SekSek] Oyun layoutu için controller oluşturuldu");
 		}
