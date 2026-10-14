@@ -6,7 +6,9 @@ self.C3_GetObjectRefTable = function () {
 		C3.Plugins.Touch,
 		C3.Plugins.Text,
 		C3.Plugins.Audio,
-		C3.Plugins.Mouse
+		C3.Plugins.Mouse,
+		C3.Behaviors.Flash,
+		C3.Plugins.Particles
 	];
 };
 self.C3_JsPropNameTable = [
@@ -90,8 +92,11 @@ self.C3_JsPropNameTable = [
 	{soru28: 0},
 	{Audio: 0},
 	{Mouse: 0},
+	{Flash: 0},
 	{konfeti: 0},
 	{Sprite4: 0},
+	{Sprite5: 0},
+	{Particles: 0},
 	{Family1: 0},
 	{cvpfonF: 0},
 	{butonlar: 0}
@@ -179,6 +184,8 @@ self.InstanceType = {
 	Mouse: class extends self.IInstance {},
 	konfeti: class extends self.ISpriteInstance {},
 	Sprite4: class extends self.ISpriteInstance {},
+	Sprite5: class extends self.ISpriteInstance {},
+	Particles: class extends self.IParticlesInstance {},
 	Family1: class extends self.ISpriteInstance {},
 	cvpfonF: class extends self.ISpriteInstance {},
 	butonlar: class extends self.ISpriteInstance {}

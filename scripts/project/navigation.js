@@ -56,6 +56,9 @@ export class LayoutNavigation {
     this.backgroundAudioOffset = 0;
     this.backgroundMusicRequestId = 0;
     this.backgroundMusicStarting = false;
+    this.finalApplauseToken = 0;
+    this.finalApplauseStarted = false;
+    this.finalApplauseElement = null;
     this.audioMuted = false;
     this.syncGameOverlay();
     this.refreshButtonHitAreas();
@@ -77,9 +80,10 @@ export class LayoutNavigation {
       this.applyPendingPageFrame();
       this.syncBackgroundMusic();
       this.syncAudioButtons();
-      this.syncFinalScore();
       setTimeout(() => this.refreshButtonHitAreas(), 50);
-      setTimeout(() => this.syncFinalScore(), 50);
+      // Wait until the final layout instances and the saved score are both
+      // available, then choose the medal frame before revealing the sprite.
+      setTimeout(() => this.syncFinalScore(), 120);
     });
     // Attempt autoplay as soon as the initial layout is available. If the
     // browser requires a gesture, handlePointer() retries without waiting for
@@ -106,12 +110,16 @@ export class LayoutNavigation {
 
     const medal = this.currentLayoutObject("madalya");
     if (!medal || !Number.isFinite(storedScore)) return;
+    medal.isVisible = false;
     const correctCount = Math.max(0, Math.floor(storedScore / 10));
     let frame = 3;
     if (correctCount >= 13) frame = 0;
     else if (correctCount >= 9) frame = 1;
     else if (correctCount >= 5) frame = 2;
     medal.animationFrame = frame;
+    medal.x = 960;
+    medal.y = 460;
+    medal.isVisible = true;
   }
 
   currentLayoutName() {
@@ -295,6 +303,11 @@ export class LayoutNavigation {
       return;
     }
     if (!layoutName) return;
+    if (this.currentLayoutName() === "final" && layoutName !== "final") {
+      this.finalApplauseToken++;
+      this.finalApplauseElement?.pause?.();
+      this.finalApplauseElement = null;
+    }
     if (layoutName === this.currentLayoutName()) {
       // The information buttons stay on the same layout but change Sprite3's
       // page.  Apply the pending frame immediately instead of returning
@@ -313,6 +326,11 @@ export class LayoutNavigation {
     }
     this.syncGameOverlay(false);
     this.runtime.goToLayout(layoutName);
+    if (layoutName === "final") {
+      // Trigger the one-shot applause from the same navigation operation that
+      // opens the final layout, after its Audio/runtime state is available.
+      setTimeout(() => this.playFinalApplauseOnce(), 80);
+    }
     setTimeout(() => {
       this.syncGameOverlay();
       this.refreshButtonHitAreas();
@@ -448,21 +466,56 @@ export class LayoutNavigation {
   }
 
   async playSoundEffect(fileName) {
-    if (this.backgroundMusicPaused) return;
+    if (this.backgroundMusicPaused) return false;
     const audioObject = this.runtime.objects.Audio;
     const audioContext = audioObject?.audioContext;
     const destination = audioObject?.destinationNode;
-    if (!audioContext || !destination) return;
+    if (!audioContext || !destination) return false;
     try {
       await audioContext.resume();
       const buffer = await this.loadAudioBuffer(fileName);
-      if (!buffer || this.backgroundMusicPaused) return;
+      if (!buffer || this.backgroundMusicPaused) return false;
       const source = audioContext.createBufferSource();
       source.buffer = buffer;
       source.loop = false;
       source.connect(destination);
       source.start(0);
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  playFinalApplauseOnce() {
+    const token = ++this.finalApplauseToken;
+    this.finalApplauseStarted = false;
+    const attempt = async attemptNumber => {
+      if (token !== this.finalApplauseToken || this.finalApplauseStarted ||
+          this.currentLayoutName() !== "final") return;
+      const started = await this.playSoundEffect("alkis.webm");
+      if (started) {
+        this.finalApplauseStarted = true;
+        return;
+      }
+      if (attemptNumber < 3) {
+        setTimeout(() => attempt(attemptNumber + 1), 250);
+      } else if (!this.backgroundMusicPaused) {
+        // Fallback for browsers which do not allow a newly-created WebAudio
+        // buffer source during layout navigation, while the same imported
+        // Construct asset remains playable through the browser audio element.
+        try {
+          const url = await this.runtime.assets.getMediaFileUrl("alkis.webm");
+          const element = new globalThis.Audio(url);
+          element.preload = "auto";
+          element.volume = 1;
+          this.finalApplauseElement?.pause?.();
+          this.finalApplauseElement = element;
+          await element.play();
+          if (token === this.finalApplauseToken) this.finalApplauseStarted = true;
+        } catch (_) {}
+      }
+    };
+    attempt(0);
   }
 
   async startBackgroundMusic(offset = 0) {

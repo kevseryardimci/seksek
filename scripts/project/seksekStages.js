@@ -786,8 +786,12 @@ export class SekSekStages {
     if (text && Number.isFinite(score)) text.text = String(score);
     const medal = this.runtime.objects.madalya?.getFirstInstance?.();
     if (!medal || !Number.isFinite(score)) return;
+    medal.isVisible = false;
     const correctCount = Math.max(0, Math.floor(score / 10));
     medal.animationFrame = correctCount >= 13 ? 0 : correctCount >= 9 ? 1 : correctCount >= 5 ? 2 : 3;
+    medal.x = 960;
+    medal.y = 460;
+    medal.isVisible = true;
   }
   showFeedback(feedback, option, hideOtherFeedback = true) {
     if (hideOtherFeedback) {
